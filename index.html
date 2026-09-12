@@ -287,6 +287,7 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
   text-decoration:none;
 }
 .ask-ai-btn svg{ width:18px; height:18px; flex:0 0 auto; }
+.ask-ai-btn.reconstruct-btn{ color:var(--purple); background:var(--purple-soft); margin-top:8px; }
 .ask-ai-note{ font-size:11.5px; color:var(--text-faint); text-align:center; margin-top:6px; line-height:1.4; }
 
 .solve-footer{ display:flex; gap:10px; margin-top:16px; }
@@ -1261,8 +1262,13 @@ function renderSolve(){
 
   html += `<a class="ask-ai-btn" href="${askGptUrl(q)}" target="_blank" rel="noopener noreferrer">` +
           `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.35 8.35 0 0 1-4-1l-4.5 1 1-4.5a8.35 8.35 0 0 1-1-4A8.38 8.38 0 0 1 12.5 3a8.5 8.5 0 0 1 8.5 8.5z"/></svg>` +
-          `<span>Ask ChatGPT about this question</span></a>` +
-          `<div class="ask-ai-note">Sign in to ChatGPT first — this opens it in Safari with the question pre-filled.</div>`;
+          `<span>Try answering with ChatGPT</span></a>` +
+          `<div class="ask-ai-note">Sign in to ChatGPT first — this opens it in Safari with the question pre-filled. AI can make mistakes, so double-check anything important.</div>`;
+
+  html += `<a class="ask-ai-btn reconstruct-btn" href="${reconstructGptUrl(q)}" target="_blank" rel="noopener noreferrer">` +
+          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h14"/><path d="M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H3"/></svg>` +
+          `<span>Reconstruct as a new 4-option MCQ</span></a>` +
+          `<div class="ask-ai-note">Opens ChatGPT with a prompt to rebuild this same concept as a fresh, board-style 4-option question — good extra practice for questions with only one recalled option or poor recalls.</div>`;
 
   html += `<div class="solve-footer">`;
   html += `<button class="icon-toggle" id="btnPrevQ" ${session.pointer===0?'disabled':''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>`;
@@ -1349,6 +1355,20 @@ function answerQuestion(id, label){
 
 function askGptUrl(q){
   let text = 'Explain this Internal Medicine board exam question and its correct answer, with reasoning:\n\n' + q.stem;
+  if(q.options && q.options.length){
+    text += '\n\n' + q.options.map(o => o.label + ') ' + o.text).join('\n');
+  }
+  return 'https://chatgpt.com/?q=' + encodeURIComponent(text);
+}
+
+function reconstructGptUrl(q){
+  let text = 'Using the same core clinical concept tested by the internal medicine board exam question below, ' +
+    'write a brand-new practice MCQ in the same style as the Saudi Board / US internal medicine boards: a fresh ' +
+    'clinical vignette (do not reuse the original wording) testing that same underlying concept, with exactly 4 ' +
+    'answer options (A-D) that are all clinically plausible and genuinely challenging to tell apart, with only one ' +
+    'clearly correct answer. After the question and options, state the correct answer and give a concise ' +
+    'explanation of why it is correct and why each other option is wrong.\n\n' +
+    'Original question (for reference only — do not repeat it back to me):\n' + q.stem;
   if(q.options && q.options.length){
     text += '\n\n' + q.options.map(o => o.label + ') ' + o.text).join('\n');
   }
