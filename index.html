@@ -768,12 +768,13 @@ const FIREBASE_CONFIG = {
 
 const looksConfigured = FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.startsWith('PASTE_');
 
-const listeners = { auth: [], remote: [], remoteNotes: [] };
+const listeners = { auth: [], remote: [], remoteNotes: [], remoteCustomSets: [] };
 let currentUser = null;
 let authReady = false;
 let unsubSnapshot = null;
 let pushTimer = null;
 let pushNotesTimer = null;
+let pushCustomSetsTimer = null;
 let fsMod, authMod, db, auth;
 
 function notifyAuth(){ listeners.auth.forEach(fn => { try{ fn(currentUser); }catch(e){} }); }
@@ -809,8 +810,10 @@ async function boot(){
           const docData = snap.exists() ? snap.data() : {};
           const remote = docData.data || {};
           const remoteNotes = docData.notes || {};
+          const remoteCustomSets = { items: docData.customSets || [], updatedAt: docData.customSetsUpdatedAt || 0 };
           listeners.remote.forEach(fn=>{ try{ fn(remote); }catch(e){} });
           listeners.remoteNotes.forEach(fn=>{ try{ fn(remoteNotes); }catch(e){} });
+          listeners.remoteCustomSets.forEach(fn=>{ try{ fn(remoteCustomSets); }catch(e){} });
         }, ()=>{});
       }
       notifyAuth();
@@ -824,9 +827,11 @@ async function boot(){
     window.CloudSync.onAuthChange = (fn) => { listeners.auth.push(fn); if(authReady) fn(currentUser); };
     window.CloudSync.onRemoteProgress = (fn) => { listeners.remote.push(fn); };
     window.CloudSync.onRemoteNotes = (fn) => { listeners.remoteNotes.push(fn); };
-    // Progress and personal notes live as two fields on the same per-user doc, so
-    // every write merges rather than replaces the whole doc (otherwise a progress
-    // push would silently wipe out notes written just before it, or vice versa).
+    window.CloudSync.onRemoteCustomSets = (fn) => { listeners.remoteCustomSets.push(fn); };
+    // Progress, personal notes and custom practice sets live as fields on the same
+    // per-user doc, so every write merges rather than replaces the whole doc
+    // (otherwise a progress push would silently wipe out notes or custom sets
+    // written just before it, or vice versa).
     window.CloudSync.pushProgress = (progressObj) => {
       if(!currentUser) return;
       clearTimeout(pushTimer);
@@ -841,6 +846,18 @@ async function boot(){
         fsMod.setDoc(fsMod.doc(db, 'progress', currentUser.uid), {notes: notesObj, updatedAt: Date.now()}, {merge:true}).catch(()=>{});
       }, 500);
     };
+    // Custom sets sync as a whole list (rather than merged item-by-item like
+    // progress/notes) because deleting a set has to actually stick across devices —
+    // a per-item union merge would just resurrect a deleted set from whichever
+    // device hasn't synced the deletion yet. customSetsUpdatedAt timestamps the
+    // whole list so the newer device's list wins outright on conflict.
+    window.CloudSync.pushCustomSets = (items, updatedAt) => {
+      if(!currentUser) return;
+      clearTimeout(pushCustomSetsTimer);
+      pushCustomSetsTimer = setTimeout(()=>{
+        fsMod.setDoc(fsMod.doc(db, 'progress', currentUser.uid), {customSets: items, customSetsUpdatedAt: updatedAt, updatedAt: Date.now()}, {merge:true}).catch(()=>{});
+      }, 500);
+    };
     window.CloudSync.pullOnce = async () => {
       if(!currentUser) return null;
       try{
@@ -853,6 +870,14 @@ async function boot(){
       try{
         const snap = await fsMod.getDoc(fsMod.doc(db, 'progress', currentUser.uid));
         return snap.exists() ? (snap.data().notes || {}) : {};
+      }catch(e){ return null; }
+    };
+    window.CloudSync.pullCustomSetsOnce = async () => {
+      if(!currentUser) return null;
+      try{
+        const snap = await fsMod.getDoc(fsMod.doc(db, 'progress', currentUser.uid));
+        const d = snap.exists() ? snap.data() : {};
+        return { items: d.customSets || [], updatedAt: d.customSetsUpdatedAt || 0 };
       }catch(e){ return null; }
     };
     window.CloudSync.ready = true;
@@ -883,6 +908,7 @@ const LS_SETTINGS = 'sbimqbank_settings_v1';
 const LS_SESSION  = 'sbimqbank_session_v1';
 const LS_NOTES    = 'sbimqbank_notes_v1';
 const LS_CUSTOM_SETS = 'sbimqbank_custom_sets_v1';
+const LS_CUSTOM_SETS_META = 'sbimqbank_custom_sets_meta_v1';
 
 /* ============================================================
    STATE
@@ -895,7 +921,11 @@ if(!settings.textScale) settings.textScale = 1;
 if(typeof settings.skipRepeats !== 'boolean') settings.skipRepeats = false;
 let session = loadJSON(LS_SESSION, null);     // {ids:[...], mode, pointer, shuffle}
 let notes = loadJSON(LS_NOTES, {});           // { [id]: {text, updatedAt} }, a free-text personal note per question
-let customSets = loadJSON(LS_CUSTOM_SETS, []); // [{id, name, ids:[...], createdAt}], user-saved filtered sets — device-local only
+let customSets = loadJSON(LS_CUSTOM_SETS, []); // [{id, name, ids:[...], createdAt, blind}], user-saved filtered sets
+// Timestamps the whole customSets list (not per-item) so cloud sync can tell whose
+// list is newer on conflict — see the "Custom sets sync" comment in the CloudSync
+// bridge for why a per-item merge would be wrong here (it can't represent deletes).
+let customSetsUpdatedAt = loadJSON(LS_CUSTOM_SETS_META, {updatedAt: 0}).updatedAt || 0;
 let filterState = {
   years: new Set(), categories: new Set(), verdictTags: new Set(),
   hasImage: 'any', status: new Set()
@@ -917,6 +947,15 @@ function saveSession(){ try{ localStorage.setItem(LS_SESSION, JSON.stringify(ses
 function saveNotesLocalOnly(){ try{ localStorage.setItem(LS_NOTES, JSON.stringify(notes)); }catch(e){} }
 function saveNotes(){ saveNotesLocalOnly(); queueNotesCloudPush(); }
 function saveCustomSetsLocalOnly(){ try{ localStorage.setItem(LS_CUSTOM_SETS, JSON.stringify(customSets)); }catch(e){} }
+function saveCustomSetsMetaLocalOnly(){ try{ localStorage.setItem(LS_CUSTOM_SETS_META, JSON.stringify({updatedAt: customSetsUpdatedAt})); }catch(e){} }
+// Call this (not saveCustomSetsLocalOnly directly) whenever a set is created or
+// deleted, so the change both persists locally and reaches other signed-in devices.
+function saveCustomSets(){
+  customSetsUpdatedAt = Date.now();
+  saveCustomSetsLocalOnly();
+  saveCustomSetsMetaLocalOnly();
+  queueCustomSetsCloudPush();
+}
 
 function getQ(id){ return DATA[id-1]; }
 
@@ -1054,6 +1093,9 @@ function initCloudSync(){
     window.CloudSync.onRemoteNotes((remote)=>{
       mergeNotes(remote);
     });
+    window.CloudSync.onRemoteCustomSets((remote)=>{
+      mergeCustomSets(remote);
+    });
   };
   if(window.CloudSync && window.CloudSync.ready){
     wire();
@@ -1100,6 +1142,22 @@ function mergeNotes(remote){
   }
 }
 
+// Custom sets sync as one unit, not per-item: whichever device's list was touched
+// (a set created or deleted) more recently simply replaces the other device's list
+// outright. A per-item union merge (like progress/notes) can't represent a delete —
+// the deleted set would just get pulled back in from whichever device hasn't heard
+// about the deletion yet.
+function mergeCustomSets(remote){
+  if(!remote) return;
+  if((remote.updatedAt||0) > (customSetsUpdatedAt||0)){
+    customSets = remote.items || [];
+    customSetsUpdatedAt = remote.updatedAt || 0;
+    saveCustomSetsLocalOnly();
+    saveCustomSetsMetaLocalOnly();
+    refreshAfterSync();
+  }
+}
+
 async function mergeFromCloud(){
   if(!window.CloudSync || !window.CloudSync.configured) return;
   setSyncStatus('syncing');
@@ -1110,6 +1168,9 @@ async function mergeFromCloud(){
     const remoteNotes = await window.CloudSync.pullNotesOnce();
     if(remoteNotes) mergeNotes(remoteNotes);
     window.CloudSync.pushNotes(notes);
+    const remoteCustomSets = await window.CloudSync.pullCustomSetsOnce();
+    if(remoteCustomSets) mergeCustomSets(remoteCustomSets);
+    window.CloudSync.pushCustomSets(customSets, customSetsUpdatedAt);
     setSyncStatus('synced');
   }catch(e){
     setSyncStatus('error');
@@ -1129,6 +1190,15 @@ function queueNotesCloudPush(){
   if(window.CloudSync && window.CloudSync.configured && cloudUser){
     setSyncStatus('syncing');
     window.CloudSync.pushNotes(notes);
+    clearTimeout(window.__syncStatusTimer);
+    window.__syncStatusTimer = setTimeout(()=> setSyncStatus('synced'), 900);
+  }
+}
+
+function queueCustomSetsCloudPush(){
+  if(window.CloudSync && window.CloudSync.configured && cloudUser){
+    setSyncStatus('syncing');
+    window.CloudSync.pushCustomSets(customSets, customSetsUpdatedAt);
     clearTimeout(window.__syncStatusTimer);
     window.__syncStatusTimer = setTimeout(()=> setSyncStatus('synced'), 900);
   }
@@ -1183,7 +1253,7 @@ function renderAccountSheetBody(){
   if(!el) return;
 
   if(!window.CloudSync || !window.CloudSync.configured){
-    el.innerHTML = `<div class="muted" style="font-size:13.5px;line-height:1.6;">Cloud sync isn’t set up on this copy of the app yet — your progress and personal notes stay on this device only for now. See the setup guide that came with the app to turn on cross-device sync with an email + password account.</div>`;
+    el.innerHTML = `<div class="muted" style="font-size:13.5px;line-height:1.6;">Cloud sync isn’t set up on this copy of the app yet — your progress, personal notes and custom practice sets stay on this device only for now. See the setup guide that came with the app to turn on cross-device sync with an email + password account.</div>`;
     return;
   }
 
@@ -1201,7 +1271,7 @@ function renderAccountSheetBody(){
     });
   } else {
     el.innerHTML = `
-      <div class="muted" style="font-size:13px;line-height:1.5;margin-bottom:14px;">Sign in with an email and password to keep your progress and personal notes in sync across every device you use this app on.</div>
+      <div class="muted" style="font-size:13px;line-height:1.5;margin-bottom:14px;">Sign in with an email and password to keep your progress, personal notes and custom practice sets in sync across every device you use this app on.</div>
       <input type="email" id="acEmail" class="field-input" placeholder="Email" autocomplete="email">
       <input type="password" id="acPassword" class="field-input" placeholder="Password (6+ characters)" autocomplete="current-password">
       <div id="acError" class="note-box other" style="display:none;"></div>
@@ -1657,7 +1727,7 @@ function renderSets(){
         delBtn.addEventListener('click', ()=>{
           if(confirm(`Delete "${def.label}"? This only removes the saved set — your answers and flags on these questions are kept.`)){
             customSets = customSets.filter(cs=>cs.id !== def.customId);
-            saveCustomSetsLocalOnly();
+            saveCustomSets();
             if(session && session.mode === def.mode){ session = null; saveSession(); }
             toast('Practice set deleted');
             renderSets();
@@ -2033,7 +2103,7 @@ function renderSaveSetSheetBody(){
       id: 'cs_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
       name, ids: idsNow, createdAt: Date.now(), blind
     });
-    saveCustomSetsLocalOnly();
+    saveCustomSets();
     closeSaveSetSheet();
     toast('Practice set saved');
     renderSets();
