@@ -909,6 +909,7 @@ const LS_SESSION  = 'sbimqbank_session_v1';
 const LS_NOTES    = 'sbimqbank_notes_v1';
 const LS_CUSTOM_SETS = 'sbimqbank_custom_sets_v1';
 const LS_CUSTOM_SETS_META = 'sbimqbank_custom_sets_meta_v1';
+const LS_SET_POSITIONS = 'sbimqbank_set_positions_v1';
 
 /* ============================================================
    STATE
@@ -926,6 +927,12 @@ let customSets = loadJSON(LS_CUSTOM_SETS, []); // [{id, name, ids:[...], created
 // list is newer on conflict — see the "Custom sets sync" comment in the CloudSync
 // bridge for why a per-item merge would be wrong here (it can't represent deletes).
 let customSetsUpdatedAt = loadJSON(LS_CUSTOM_SETS_META, {updatedAt: 0}).updatedAt || 0;
+// Remembers the last pointer/blind-round-state for each practice set's mode, so that
+// switching the live session away (e.g. looking up an unrelated question via Browse
+// search, which replaces `session` with an ad-hoc 'filter' session) doesn't
+// permanently lose your place — resuming a set later restores from here even though
+// the live `session` object has since moved on. Device-local only, same as `session`.
+let setPositions = loadJSON(LS_SET_POSITIONS, {}); // { [mode]: {pointer, blind, blindAnswered, updatedAt} }
 let filterState = {
   years: new Set(), categories: new Set(), verdictTags: new Set(),
   hasImage: 'any', status: new Set()
@@ -944,6 +951,7 @@ function saveProgressLocalOnly(){ try{ localStorage.setItem(LS_PROGRESS, JSON.st
 function saveProgress(){ saveProgressLocalOnly(); queueCloudPush(); }
 function saveSettings(){ try{ localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); }catch(e){} }
 function saveSession(){ try{ localStorage.setItem(LS_SESSION, JSON.stringify(session)); }catch(e){} }
+function saveSetPositionsLocalOnly(){ try{ localStorage.setItem(LS_SET_POSITIONS, JSON.stringify(setPositions)); }catch(e){} }
 function saveNotesLocalOnly(){ try{ localStorage.setItem(LS_NOTES, JSON.stringify(notes)); }catch(e){} }
 function saveNotes(){ saveNotesLocalOnly(); queueNotesCloudPush(); }
 function saveCustomSetsLocalOnly(){ try{ localStorage.setItem(LS_CUSTOM_SETS, JSON.stringify(customSets)); }catch(e){} }
@@ -1729,6 +1737,7 @@ function renderSets(){
             customSets = customSets.filter(cs=>cs.id !== def.customId);
             saveCustomSets();
             if(session && session.mode === def.mode){ session = null; saveSession(); }
+            if(setPositions[def.mode]){ delete setPositions[def.mode]; saveSetPositionsLocalOnly(); }
             toast('Practice set deleted');
             renderSets();
           }
@@ -1754,6 +1763,13 @@ function quickStart(opts){
    ============================================================ */
 function startSession(ids, mode, opts){
   opts = opts || {};
+  // Before swapping the live session out for a different one (e.g. jumping to a
+  // question via Browse search while a practice set is mid-solve), remember where
+  // it was so resuming that set later can pick back up instead of restarting —
+  // see rememberSetPosition.
+  if(session && session.mode !== mode){
+    rememberSetPosition(session);
+  }
   let pointer = 0;
   // "Blind retest" sessions (from a custom practice set saved with that option) keep a
   // per-session record of which questions have been answered *this round* — separate from
@@ -1767,10 +1783,24 @@ function startSession(ids, mode, opts){
     pointer = Math.min(session.pointer, ids.length-1);
     blind = !!session.blind;
     blindAnswered = session.blindAnswered || {};
+  } else if(opts.resume && setPositions[mode]){
+    // The live session has already moved on to a different mode (or there isn't
+    // one), but we have a remembered spot for this exact set from before that —
+    // restore from there instead of starting over at question 1.
+    const remembered = setPositions[mode];
+    pointer = Math.min(remembered.pointer || 0, ids.length - 1);
+    blind = (typeof remembered.blind === 'boolean') ? remembered.blind : blind;
+    blindAnswered = remembered.blindAnswered || {};
   }
   session = {ids, mode, pointer, startedAt: Date.now(), blind, blindAnswered};
   saveSession();
   renderSolve();
+}
+
+function rememberSetPosition(s){
+  if(!s || !s.mode) return;
+  setPositions[s.mode] = { pointer: s.pointer, blind: !!s.blind, blindAnswered: s.blindAnswered || {}, updatedAt: Date.now() };
+  saveSetPositionsLocalOnly();
 }
 
 function currentQ(){
@@ -2519,6 +2549,7 @@ function renderAnalysis(){
     if(confirm('This clears all answers, flags and session position on this device. Continue?')){
       progress = {}; saveProgress();
       session = null; saveSession();
+      setPositions = {}; saveSetPositionsLocalOnly();
       renderHome(); renderAnalysis();
       document.getElementById('solveBody').innerHTML = emptySolveStateHTML();
       toast('Progress reset');
