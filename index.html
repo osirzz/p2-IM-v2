@@ -251,6 +251,7 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
 .sc-breakdown-legend .lbl{ width:118px; flex:0 0 auto; }
 .sc-breakdown-legend .track{ flex:1; }
 .sc-breakdown-legend .pct{ width:38px; flex:0 0 auto; font-size:10.5px; color:var(--text-faint); font-weight:700; text-align:right; }
+.set-card .sc-delete{ display:block; width:100%; margin-top:12px; }
 .pct-good{ color:var(--green); }
 .pct-mid{ color:var(--amber); }
 .pct-bad{ color:var(--red); }
@@ -614,6 +615,7 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
     <div id="browseList"></div>
     <div style="height:14px"></div>
     <button class="btn btn-primary" id="btnStartFromBrowse" style="display:none;">Start quiz with these results</button>
+    <button class="btn btn-outline" id="btnSaveAsSet" style="display:none;margin-top:10px;">Save as practice set</button>
   </section>
 
   <!-- ============ ANALYSIS ============ -->
@@ -697,6 +699,18 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
       </button>
     </div>
     <div class="filter-sheet-body" id="noteBody"></div>
+  </div>
+
+  <!-- ============ SAVE AS PRACTICE SET SHEET ============ -->
+  <div class="filter-sheet-backdrop" id="saveSetBackdrop"></div>
+  <div class="filter-sheet" id="saveSetSheet" style="max-height:none;">
+    <div class="filter-sheet-head">
+      <div class="t">Save as practice set</div>
+      <button class="iconbtn" id="btnCloseSaveSet">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="filter-sheet-body" id="saveSetBody"></div>
   </div>
 
   <!-- ============ IMAGE LIGHTBOX: tap an exam image to view it larger ============ -->
@@ -867,6 +881,7 @@ const LS_PROGRESS = 'sbimqbank_progress_v1';
 const LS_SETTINGS = 'sbimqbank_settings_v1';
 const LS_SESSION  = 'sbimqbank_session_v1';
 const LS_NOTES    = 'sbimqbank_notes_v1';
+const LS_CUSTOM_SETS = 'sbimqbank_custom_sets_v1';
 
 /* ============================================================
    STATE
@@ -879,6 +894,7 @@ if(!settings.textScale) settings.textScale = 1;
 if(typeof settings.skipRepeats !== 'boolean') settings.skipRepeats = false;
 let session = loadJSON(LS_SESSION, null);     // {ids:[...], mode, pointer, shuffle}
 let notes = loadJSON(LS_NOTES, {});           // { [id]: {text, updatedAt} }, a free-text personal note per question
+let customSets = loadJSON(LS_CUSTOM_SETS, []); // [{id, name, ids:[...], createdAt}], user-saved filtered sets — device-local only
 let filterState = {
   years: new Set(), categories: new Set(), verdictTags: new Set(),
   hasImage: 'any', status: new Set()
@@ -899,6 +915,7 @@ function saveSettings(){ try{ localStorage.setItem(LS_SETTINGS, JSON.stringify(s
 function saveSession(){ try{ localStorage.setItem(LS_SESSION, JSON.stringify(session)); }catch(e){} }
 function saveNotesLocalOnly(){ try{ localStorage.setItem(LS_NOTES, JSON.stringify(notes)); }catch(e){} }
 function saveNotes(){ saveNotesLocalOnly(); queueNotesCloudPush(); }
+function saveCustomSetsLocalOnly(){ try{ localStorage.setItem(LS_CUSTOM_SETS, JSON.stringify(customSets)); }catch(e){} }
 
 function getQ(id){ return DATA[id-1]; }
 
@@ -1254,12 +1271,15 @@ function wireStaticEvents(){
   document.getElementById('btnCloseNote').addEventListener('click', closeNoteSheet);
   document.getElementById('noteBackdrop').addEventListener('click', closeNoteSheet);
 
+  document.getElementById('btnCloseSaveSet').addEventListener('click', closeSaveSetSheet);
+  document.getElementById('saveSetBackdrop').addEventListener('click', closeSaveSetSheet);
+
   document.getElementById('btnCloseLightbox').addEventListener('click', closeImageLightbox);
   document.getElementById('imgLightbox').addEventListener('click', (e)=>{
     if(e.target.id === 'imgLightbox') closeImageLightbox();
   });
   document.addEventListener('keydown', (e)=>{
-    if(e.key === 'Escape'){ closeImageLightbox(); closeNoteSheet(); }
+    if(e.key === 'Escape'){ closeImageLightbox(); closeNoteSheet(); closeSaveSetSheet(); }
   });
   document.getElementById('tsSlider').addEventListener('input', (e)=>{
     const scale = parseInt(e.target.value,10) / 100;
@@ -1339,6 +1359,7 @@ function wireStaticEvents(){
     startSession(browseShuffle ? shuffleArr(ids.slice()) : ids, 'filter', {});
     showView('solve');
   });
+  document.getElementById('btnSaveAsSet').addEventListener('click', openSaveSetSheet);
 }
 
 function toast(msg){
@@ -1474,6 +1495,17 @@ function practiceSetDefs(){
   if(v2All.length){
     defs.push({key:'v2', label:'QBank Refined V2', mode:'sequential_v2', ids: v2All});
   }
+  // User-saved sets from Browse & filter, newest first. Each carries its own
+  // unique session mode (custom_<id>) so resuming one never gets confused
+  // with an ad-hoc filter session or another custom set of the same length.
+  // ids are filtered against the current DATA in case a build ever shrinks —
+  // harmless no-op otherwise.
+  customSets.slice().sort((a,b)=>b.createdAt - a.createdAt).forEach(cs=>{
+    defs.push({
+      key: 'custom_' + cs.id, label: cs.name, mode: 'custom_' + cs.id,
+      ids: cs.ids.filter(id=>getQ(id)), custom: true, customId: cs.id
+    });
+  });
   return defs;
 }
 
@@ -1595,6 +1627,7 @@ function renderSets(){
       <div class="sc-pace">${setPaceText(stats)}</div>
       <button class="studyaid-toggle sc-breakdown-toggle" data-key="${def.key}">Show breakdown by subspecialty</button>
       <div class="sc-breakdown" id="scBreakdown-${def.key}" style="display:none;">${setBreakdownHTML(stats.perCat)}</div>
+      ${def.custom ? `<button class="btn btn-outline sc-delete" data-key="${def.key}">Delete practice set</button>` : ''}
     </div>`;
   });
   el.innerHTML = html;
@@ -1617,6 +1650,20 @@ function renderSets(){
       panel.style.display = open ? 'none' : '';
       toggle.textContent = (open ? 'Show' : 'Hide') + ' breakdown by subspecialty';
     });
+    if(def.custom){
+      const delBtn = card.querySelector('.sc-delete');
+      if(delBtn){
+        delBtn.addEventListener('click', ()=>{
+          if(confirm(`Delete "${def.label}"? This only removes the saved set — your answers and flags on these questions are kept.`)){
+            customSets = customSets.filter(cs=>cs.id !== def.customId);
+            saveCustomSetsLocalOnly();
+            if(session && session.mode === def.mode){ session = null; saveSession(); }
+            toast('Practice set deleted');
+            renderSets();
+          }
+        });
+      }
+    }
   });
 }
 
@@ -1899,6 +1946,71 @@ function setNote(qid, text){
   saveNotes();
 }
 
+/* ============================================================
+   SAVE AS PRACTICE SET (from Browse & filter)
+   ============================================================ */
+// Builds a short, readable default name from whatever's currently active in
+// Browse & filter, so the sheet opens with a sensible name already typed —
+// the user can just tap Save, or edit it first.
+function describeActiveFilters(){
+  const parts = [];
+  if(filterState.categories.size) parts.push(Array.from(filterState.categories).join(', '));
+  if(filterState.years.size) parts.push(Array.from(filterState.years).sort().join('/'));
+  if(filterState.verdictTags.size) parts.push(Array.from(filterState.verdictTags).map(v=>VERDICT_LABEL[v]).join(', '));
+  if(filterState.status.size){
+    const labels = {unanswered:'Unanswered', answered:'Answered', correct:'Correct', incorrect:'Incorrect', flagged:'Flagged'};
+    parts.push(Array.from(filterState.status).map(s=>labels[s]).join('+'));
+  }
+  if(filterState.hasImage === true) parts.push('With images');
+  if(filterState.hasImage === false) parts.push('No images');
+  if(browseSearchTerm) parts.push('"' + browseSearchTerm + '"');
+  return parts.length ? parts.join(' · ') : 'Custom set';
+}
+
+function openSaveSetSheet(){
+  renderSaveSetSheetBody();
+  document.getElementById('saveSetSheet').classList.add('open');
+  document.getElementById('saveSetBackdrop').classList.add('open');
+  const inp = document.getElementById('saveSetName');
+  if(inp){ inp.focus(); inp.select(); }
+}
+function closeSaveSetSheet(){
+  const sheet = document.getElementById('saveSetSheet');
+  if(!sheet) return;
+  sheet.classList.remove('open');
+  document.getElementById('saveSetBackdrop').classList.remove('open');
+}
+
+function renderSaveSetSheetBody(){
+  const el = document.getElementById('saveSetBody');
+  if(!el) return;
+  const ids = getFilteredIds();
+  const suggested = describeActiveFilters();
+
+  el.innerHTML = `
+    <div class="muted" style="font-size:12.5px;margin-bottom:10px;line-height:1.5;">${ids.length} question${ids.length===1?'':'s'} will be saved as a new practice set, exactly as filtered now. It'll show up on the Sets page with its own progress bar. Give it a name:</div>
+    <input type="text" id="saveSetName" class="field-input" maxlength="60" value="${escapeHTML(suggested)}" placeholder="Set name">
+    <div class="btn-row">
+      <button class="btn btn-outline" id="btnCancelSaveSet">Cancel</button>
+      <button class="btn btn-primary" id="btnConfirmSaveSet">Save set</button>
+    </div>`;
+
+  document.getElementById('btnCancelSaveSet').addEventListener('click', closeSaveSetSheet);
+  document.getElementById('btnConfirmSaveSet').addEventListener('click', ()=>{
+    const idsNow = getFilteredIds();
+    if(!idsNow.length){ toast('No questions to save'); closeSaveSetSheet(); return; }
+    const name = (document.getElementById('saveSetName').value || '').trim() || 'Custom set';
+    customSets.push({
+      id: 'cs_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+      name, ids: idsNow, createdAt: Date.now()
+    });
+    saveCustomSetsLocalOnly();
+    closeSaveSetSheet();
+    toast('Practice set saved');
+    renderSets();
+  });
+}
+
 function openImageLightbox(src){
   document.getElementById('imgLightboxImg').src = src;
   document.getElementById('imgLightbox').classList.add('open');
@@ -2109,6 +2221,7 @@ function renderBrowse(){
   document.getElementById('activeFilterCount').textContent = cnt ? ('('+cnt+')') : '';
   document.getElementById('browseCount').textContent = ids.length + ' question' + (ids.length===1?'':'s');
   document.getElementById('btnStartFromBrowse').style.display = ids.length ? '' : 'none';
+  document.getElementById('btnSaveAsSet').style.display = ids.length ? '' : 'none';
 
   const MAX_RENDER = 200;
   const shown = ids.slice(0, MAX_RENDER);
