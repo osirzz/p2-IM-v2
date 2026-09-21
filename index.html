@@ -881,7 +881,7 @@ let session = loadJSON(LS_SESSION, null);     // {ids:[...], mode, pointer, shuf
 let notes = loadJSON(LS_NOTES, {});           // { [id]: {text, updatedAt} }, a free-text personal note per question
 let filterState = {
   years: new Set(), categories: new Set(), verdictTags: new Set(),
-  hasImage: 'any', status: 'all'
+  hasImage: 'any', status: new Set()
 };
 let browseShuffle = false;
 let browseSearchTerm = '';
@@ -1320,7 +1320,7 @@ function wireStaticEvents(){
   document.getElementById('btnCloseFilters').addEventListener('click', closeFilterSheet);
   document.getElementById('filterBackdrop').addEventListener('click', closeFilterSheet);
   document.getElementById('btnClearFilters').addEventListener('click', ()=>{
-    filterState = {years:new Set(), categories:new Set(), verdictTags:new Set(), hasImage:'any', status:'all'};
+    filterState = {years:new Set(), categories:new Set(), verdictTags:new Set(), hasImage:'any', status:new Set()};
     browseSearchTerm=''; document.getElementById('browseSearch').value='';
     renderBrowse(); renderFilterSheetBody();
   });
@@ -2078,11 +2078,16 @@ function getFilteredIds(){
     if(filterState.hasImage === true && !q.hasImage) return false;
     if(filterState.hasImage === false && q.hasImage) return false;
     const p = progress[q.id];
-    if(filterState.status === 'unanswered' && p && p.answered) return false;
-    if(filterState.status === 'answered' && !(p && p.answered)) return false;
-    if(filterState.status === 'correct' && !(p && p.correct === true)) return false;
-    if(filterState.status === 'incorrect' && !(p && p.correct === false)) return false;
-    if(filterState.status === 'flagged' && !(p && p.flagged)) return false;
+    if(filterState.status.size){
+      const st = filterState.status;
+      const statusMatch =
+        (st.has('unanswered') && !(p && p.answered)) ||
+        (st.has('answered') && !!(p && p.answered)) ||
+        (st.has('correct') && !!(p && p.correct === true)) ||
+        (st.has('incorrect') && !!(p && p.correct === false)) ||
+        (st.has('flagged') && !!(p && p.flagged));
+      if(!statusMatch) return false;
+    }
     if(browseSearchTerm){
       const hay = (q.stem+' '+q.options.map(o=>o.text).join(' ')+' '+q.whyCorrect).toLowerCase();
       if(!hay.includes(browseSearchTerm)) return false;
@@ -2093,7 +2098,7 @@ function getFilteredIds(){
 
 function countActiveFilters(){
   return filterState.years.size + filterState.categories.size + filterState.verdictTags.size +
-    (filterState.hasImage!=='any'?1:0) + (filterState.status!=='all'?1:0);
+    (filterState.hasImage!=='any'?1:0) + filterState.status.size;
 }
 
 function renderBrowse(){
@@ -2217,16 +2222,11 @@ function renderFilterSheetBody(){
   });
 
   const fStatus = document.getElementById('fStatus');
-  [['all','All'],['unanswered','Unanswered'],['answered','Answered'],['correct','Correct'],['incorrect','Incorrect'],['flagged','Flagged']].forEach(([val,label])=>{
+  [['unanswered','Unanswered'],['answered','Answered'],['correct','Correct'],['incorrect','Incorrect'],['flagged','Flagged']].forEach(([val,label])=>{
     const b = document.createElement('button');
-    b.className = 'chip' + (filterState.status===val?' active':'');
+    b.className = 'chip' + (filterState.status.has(val)?' active':'');
     b.textContent = label;
-    b.addEventListener('click', ()=>{
-      filterState.status = val;
-      [...fStatus.children].forEach(c=>c.classList.remove('active'));
-      b.classList.add('active');
-      renderBrowse();
-    });
+    b.addEventListener('click', ()=>{ chipToggleSet(filterState.status, val, b); renderBrowse(); });
     fStatus.appendChild(b);
   });
 
