@@ -239,6 +239,7 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
 .set-card .sc-head{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:10px; }
 .set-card .sc-title{ font-weight:700; font-size:15.5px; }
 .set-card .sc-live{ font-weight:600; font-size:12px; color:var(--accent); }
+.set-card .sc-blind{ font-weight:600; font-size:12px; color:var(--text-dim); }
 .set-card .sc-pct{ font-weight:800; font-size:14px; color:var(--accent); flex:0 0 auto; }
 .set-card .sc-bar{ height:8px; border-radius:100px; background:var(--card-border); overflow:hidden; margin-bottom:10px; }
 .set-card .sc-bar > i{ display:block; height:100%; background:var(--accent); border-radius:100px; }
@@ -1503,7 +1504,7 @@ function practiceSetDefs(){
   customSets.slice().sort((a,b)=>b.createdAt - a.createdAt).forEach(cs=>{
     defs.push({
       key: 'custom_' + cs.id, label: cs.name, mode: 'custom_' + cs.id,
-      ids: cs.ids.filter(id=>getQ(id)), custom: true, customId: cs.id
+      ids: cs.ids.filter(id=>getQ(id)), custom: true, customId: cs.id, blind: !!cs.blind
     });
   });
   return defs;
@@ -1616,7 +1617,7 @@ function renderSets(){
     html += `<div class="set-card" data-key="${def.key}">
       <button class="sc-resume">
         <div class="sc-head">
-          <div class="sc-title">${escapeHTML(def.label)}${isActive ? ' <span class="sc-live">· in progress</span>' : ''}</div>
+          <div class="sc-title">${escapeHTML(def.label)}${def.blind ? ' <span class="sc-blind">· blind retest</span>' : ''}${isActive ? ' <span class="sc-live">· in progress</span>' : ''}</div>
           <div class="sc-pct">${stats.pct}%</div>
         </div>
         <div class="sc-bar"><i style="width:${stats.pct}%"></i></div>
@@ -1639,7 +1640,7 @@ function renderSets(){
       if(session && session.mode === def.mode && session.ids.length === def.ids.length){
         showView('solve');
       } else {
-        startSession(def.ids, def.mode, {resume:true});
+        startSession(def.ids, def.mode, {resume:true, blind: !!def.blind});
         showView('solve');
       }
     });
@@ -1684,10 +1685,20 @@ function quickStart(opts){
 function startSession(ids, mode, opts){
   opts = opts || {};
   let pointer = 0;
+  // "Blind retest" sessions (from a custom practice set saved with that option) keep a
+  // per-session record of which questions have been answered *this round* — separate from
+  // the real, permanent progress[] record — so a question you already answered before
+  // (that's exactly why it's in this set) doesn't show its old correct/incorrect mark and
+  // explanation before you've had a chance to answer it again. Resuming the same session
+  // (same mode) preserves that record; starting fresh always clears it.
+  let blind = !!opts.blind;
+  let blindAnswered = {};
   if(opts.resume && session && session.mode === mode){
     pointer = Math.min(session.pointer, ids.length-1);
+    blind = !!session.blind;
+    blindAnswered = session.blindAnswered || {};
   }
-  session = {ids, mode, pointer, startedAt: Date.now()};
+  session = {ids, mode, pointer, startedAt: Date.now(), blind, blindAnswered};
   saveSession();
   renderSolve();
 }
@@ -1711,7 +1722,11 @@ function renderSolve(){
 
   const q = currentQ();
   const p = progress[q.id] || {};
-  const answered = !!p.answered;
+  const blindMode = !!session.blind;
+  // In a blind retest, "answered" means answered *this round*, not ever — otherwise a
+  // question saved into the set precisely because it was already flagged/incorrect would
+  // show its old verdict the instant it's opened.
+  const answered = blindMode ? !!(session.blindAnswered && session.blindAnswered[q.id]) : !!p.answered;
 
   let html = '';
   html += '<div class="q-meta">';
@@ -1756,7 +1771,9 @@ function renderSolve(){
     html += `<button class="btn btn-primary" id="btnAckUnscorable" style="margin-top:14px;">${answered? 'Reviewed ✓' : 'Mark as reviewed'}</button>`;
   } else {
     q.options.forEach(opt=>{
-      const isSel = p.chosen === opt.label;
+      // Before this round's answer, a blind retest ignores any old chosen option too —
+      // otherwise the previous pick would sit pre-highlighted as a giveaway.
+      const isSel = (blindMode && !answered) ? false : (p.chosen === opt.label);
       const isCorrectOpt = q.correctLetter === opt.label;
       let cls = 'opt';
       let mark = '';
@@ -1852,6 +1869,7 @@ function wireSolveEvents(q, p){
   if(ack) ack.addEventListener('click', ()=>{
     progress[q.id] = Object.assign({chosen:null, correct:null, flagged:false, answeredAt:Date.now()}, progress[q.id]||{}, {answered:true});
     saveProgress();
+    markBlindAnswered(q.id);
     renderSolve();
   });
   const sa = document.getElementById('toggleStudyAid');
@@ -1990,6 +2008,16 @@ function renderSaveSetSheetBody(){
   el.innerHTML = `
     <div class="muted" style="font-size:12.5px;margin-bottom:10px;line-height:1.5;">${ids.length} question${ids.length===1?'':'s'} will be saved as a new practice set, exactly as filtered now. It'll show up on the Sets page with its own progress bar. Give it a name:</div>
     <input type="text" id="saveSetName" class="field-input" maxlength="60" value="${escapeHTML(suggested)}" placeholder="Set name">
+    <div class="toggle-row" id="rowSaveSetBlind" style="margin-bottom:14px;">
+      <div class="tx">
+        <div class="t1">Test myself (no answers)</div>
+        <div class="t2">Hides your previous answer/correctness on each question until you answer it again — useful for retesting questions you've already seen, like Incorrect or Flagged.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="saveSetBlind">
+        <span class="slider"></span>
+      </label>
+    </div>
     <div class="btn-row">
       <button class="btn btn-outline" id="btnCancelSaveSet">Cancel</button>
       <button class="btn btn-primary" id="btnConfirmSaveSet">Save set</button>
@@ -2000,9 +2028,10 @@ function renderSaveSetSheetBody(){
     const idsNow = getFilteredIds();
     if(!idsNow.length){ toast('No questions to save'); closeSaveSetSheet(); return; }
     const name = (document.getElementById('saveSetName').value || '').trim() || 'Custom set';
+    const blind = !!document.getElementById('saveSetBlind').checked;
     customSets.push({
       id: 'cs_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
-      name, ids: idsNow, createdAt: Date.now()
+      name, ids: idsNow, createdAt: Date.now(), blind
     });
     saveCustomSetsLocalOnly();
     closeSaveSetSheet();
@@ -2026,7 +2055,18 @@ function answerQuestion(id, label){
   const prev = progress[id] || {};
   progress[id] = {chosen:label, correct, flagged: !!prev.flagged, answered:true, answeredAt:Date.now()};
   saveProgress();
+  markBlindAnswered(id);
   renderSolve();
+}
+
+// Records that a question has now been answered in the current blind-retest round (a
+// no-op outside a blind session). Kept on the session object (not progress[]) so it never
+// touches the real answer history — only this round's reveal state.
+function markBlindAnswered(id){
+  if(!session || !session.blind) return;
+  session.blindAnswered = session.blindAnswered || {};
+  session.blindAnswered[id] = true;
+  saveSession();
 }
 
 // Image captions describe what the accompanying ECG/X-ray/clinical photo shows, which is
