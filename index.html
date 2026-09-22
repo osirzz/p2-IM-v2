@@ -927,6 +927,17 @@ let customSets = loadJSON(LS_CUSTOM_SETS, []); // [{id, name, ids:[...], created
 // list is newer on conflict — see the "Custom sets sync" comment in the CloudSync
 // bridge for why a per-item merge would be wrong here (it can't represent deletes).
 let customSetsUpdatedAt = loadJSON(LS_CUSTOM_SETS_META, {updatedAt: 0}).updatedAt || 0;
+// Migration safety net: a set created before cloud sync existed for custom sets (or
+// before this timestamp tracking was added) sits here with updatedAt stuck at 0 —
+// indistinguishable from "nothing to sync". Left alone, it can never win a merge
+// against another device that's also at 0 (a strict "remote > local" comparison never
+// fires), so real data can sit in Firestore forever without a fresh device ever pulling
+// it. Stamp it with a real timestamp now so the next push carries a timestamp that
+// actually reflects "this device's data, as of now".
+if(customSets.length && !customSetsUpdatedAt){
+  customSetsUpdatedAt = Date.now();
+  saveCustomSetsMetaLocalOnly();
+}
 // Remembers the last pointer/blind-round-state for each practice set's mode, so that
 // switching the live session away (e.g. looking up an unrelated question via Browse
 // search, which replaces `session` with an ad-hoc 'filter' session) doesn't
@@ -1157,8 +1168,16 @@ function mergeNotes(remote){
 // about the deletion yet.
 function mergeCustomSets(remote){
   if(!remote) return;
-  if((remote.updatedAt||0) > (customSetsUpdatedAt||0)){
-    customSets = remote.items || [];
+  const remoteItems = remote.items || [];
+  const remoteIsNewer = (remote.updatedAt||0) > (customSetsUpdatedAt||0);
+  // Safety net alongside the migration stamp above: if this device has no custom sets
+  // at all but the remote does, adopt them regardless of the timestamp comparison —
+  // there's nothing local to lose, and a remote stuck at a stale/zero timestamp (from
+  // before a device migrated) should never be able to permanently hide real data from
+  // a device that's genuinely empty.
+  const shouldAdoptEmptyLocal = !customSets.length && remoteItems.length > 0;
+  if(remoteIsNewer || shouldAdoptEmptyLocal){
+    customSets = remoteItems;
     customSetsUpdatedAt = remote.updatedAt || 0;
     saveCustomSetsLocalOnly();
     saveCustomSetsMetaLocalOnly();
