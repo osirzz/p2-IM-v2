@@ -394,7 +394,9 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
 }
 .drawer.open{ transform:translateX(0); }
 .drawer-head{ padding: calc(14px + var(--safe-top)) 14px 12px; border-bottom:1px solid var(--card-border); display:flex; align-items:center; gap:10px; }
-.drawer-head .t{ font-weight:800; font-size:16px; flex:1; }
+.drawer-head-text{ flex:1; min-width:0; }
+.drawer-head .t{ font-weight:800; font-size:16px; }
+.drawer-subtitle{ font-size:12.5px; font-weight:600; color:var(--text-dim); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .drawer-search{ padding:10px 14px; border-bottom:1px solid var(--card-border); }
 .drawer-search input{
   width:100%; padding:9px 12px; border-radius:10px; border:1px solid var(--card-border); background:var(--card); color:var(--text); font-size:14px;
@@ -726,7 +728,10 @@ h2.section-title{ font-size:14px; text-transform:uppercase; letter-spacing:0.04e
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
   <div class="drawer" id="drawer">
     <div class="drawer-head">
-      <div class="t">Questions</div>
+      <div class="drawer-head-text">
+        <div class="t">Questions</div>
+        <div class="drawer-subtitle" id="drawerSubtitle"></div>
+      </div>
       <button class="iconbtn" id="btnCloseDrawer">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -1041,7 +1046,6 @@ async function init(){
     document.getElementById('solveBody').innerHTML = '<div class="empty-state">Could not load question data. Try reloading.</div>';
     return;
   }
-  buildDrawer();
   renderHome();
   if(session && session.ids && session.ids.length){
     renderSolve();
@@ -2247,32 +2251,53 @@ function escapeHTML(s){
 }
 
 /* ============================================================
-   SIDE DRAWER (full corpus navigator)
+   SIDE DRAWER (navigator for the ACTIVE practice set/session —
+   scoped to session.ids, not the full corpus. Rebuilt every time
+   it's opened so it always reflects whichever set is currently
+   being solved.)
    ============================================================ */
+function currentSetLabel(){
+  if(!session || !session.ids || !session.ids.length) return '';
+  if(session.mode === 'review') return 'Flagged & Incorrect';
+  if(session.mode === 'filter') return 'Filtered Questions';
+  const defs = practiceSetDefs();
+  const match = defs.find(d => d.mode === session.mode);
+  return match ? match.label : 'Current Questions';
+}
+
 function buildDrawer(){
-  const groups = {}; // key "year|category" -> ids[]
-  DATA.forEach(q=>{
+  const ids = (session && session.ids) ? session.ids : [];
+  const groups = {}; // key "year|category" -> ids[], restricted to the active session
+  ids.forEach(id=>{
+    const q = getQ(id);
+    if(!q) return;
     const key = q.year+'|'+q.category;
-    (groups[key] = groups[key] || []).push(q.id);
+    (groups[key] = groups[key] || []).push(id);
   });
-  const years = sortYears([...new Set(DATA.map(q=>q.year))]);
+  const years = sortYears([...new Set(ids.map(id=>{ const q=getQ(id); return q && q.year; }).filter(y=>y!==undefined))]);
   let html = '';
   years.forEach(year=>{
     CATEGORY_ORDER.forEach(cat=>{
       const key = year+'|'+cat;
-      const ids = groups[key];
-      if(!ids || !ids.length) return;
+      const groupIds = groups[key];
+      if(!groupIds || !groupIds.length) return;
       html += `<div class="drawer-group" data-group="${key}">`;
-      html += `<div class="drawer-group-head" data-toggle="${key}"><span class="chev">▾</span><span>${year} · ${escapeHTML(cat)}</span><span class="faint" style="margin-left:auto;font-weight:600;">${ids.length}</span></div>`;
+      html += `<div class="drawer-group-head" data-toggle="${key}"><span class="chev">▾</span><span>${year} · ${escapeHTML(cat)}</span><span class="faint" style="margin-left:auto;font-weight:600;">${groupIds.length}</span></div>`;
       html += `<div class="drawer-group-items">`;
-      ids.forEach(id=>{
+      groupIds.forEach(id=>{
         const q = getQ(id);
         html += `<div class="dq" data-id="${id}" data-search="${escapeHTML((q.pdfNumber+' '+q.stem).toLowerCase())}">${q.pdfNumber}</div>`;
       });
       html += `</div></div>`;
     });
   });
-  document.getElementById('drawerList').innerHTML = html;
+  document.getElementById('drawerList').innerHTML = html || '<div class="empty-state">No questions in this set.</div>';
+
+  const subtitleEl = document.getElementById('drawerSubtitle');
+  if(subtitleEl){
+    const label = currentSetLabel();
+    subtitleEl.textContent = label ? `${label} · ${ids.length} question${ids.length===1?'':'s'}` : '';
+  }
 
   document.querySelectorAll('.drawer-group-head').forEach(h=>{
     h.addEventListener('click', ()=>{
@@ -2283,10 +2308,9 @@ function buildDrawer(){
   document.querySelectorAll('.dq').forEach(el=>{
     el.addEventListener('click', ()=>{
       const id = parseInt(el.dataset.id,10);
-      const isV2 = getQ(id).qset === 'v2';
-      const allIds = isV2 ? v2Ids() : mainIds();
-      startSession(allIds, isV2 ? 'sequential_v2' : 'sequential', {});
-      session.pointer = allIds.indexOf(id);
+      const idx = session && session.ids ? session.ids.indexOf(id) : -1;
+      if(idx === -1) return; // stale click target from a since-changed session; ignore
+      session.pointer = idx;
       saveSession();
       renderSolve();
       closeDrawer();
@@ -2311,7 +2335,9 @@ function refreshDrawerHighlight(){
 }
 
 function openDrawer(){
+  buildDrawer();
   refreshDrawerHighlight();
+  document.getElementById('drawerSearch').value = '';
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawerBackdrop').classList.add('open');
   const curId = session && session.ids.length ? session.ids[session.pointer] : null;
